@@ -1,0 +1,128 @@
+---
+title: "Does Danger Rise After Dark? Temporal Patterns in NYPD Shooting Incidents"
+author: ''
+date: "2026-07-02"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+In this project we are setting up ourselves to answer the question, is it actually more unsafe as the night progresses? Is there a clear pattern we can model or this is a belief that is not well-founded. We will first look at the time of day and then look at it from time of the year, to identify if there is a similar pattern if any. Let us look at the data set first:
+
+```{r column_names, include=TRUE, eval=TRUE}
+#get capture the csv file url in a variable to read it
+url_in <- c("https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD")
+#get the tidyverse library
+library(tidyverse)
+#read the data
+data <- read_csv(url_in)
+#read the column names of the data
+#this is so that we can choose to look at and work with
+columns <- c(names(data))
+print(columns)
+```
+
+
+The dataset has 21 variables. We don't need all that columns so we will shrink it, we will select and also convert the time from str to actual times, and the dates to actual dates and clean it up.
+
+```{r data__clean_select, include=TRUE, eval=TRUE}
+library(lubridate)
+#selecting the data into a new varible first, so we can still use the original data if required
+data_selected <- select(data, "OCCUR_DATE", "OCCUR_TIME")
+#modifying the selected data to convert the date
+data_selected <- mutate(data_selected, OCCUR_DATE = mdy (OCCUR_DATE))
+```
+
+```{r data_hourly_uncentered, include=TRUE, eval=TRUE}
+#setting up the dataset to convert the time into hours
+data_selected <- mutate(data_selected, OCCUR_hour = hour(OCCUR_TIME))
+#plotting it directly gives us a naive view a valley
+#but since it is cyclical we can transform the plot to have the peak in the middle
+ggplot(data_selected, aes(x = OCCUR_hour)) +
+  geom_histogram(binwidth = 1) +
+  labs(title = "NYC Shootings by Hour of Day (naive)",
+       x = "Hour (uncentered)", y = "Number of incidents")
+```
+
+### Analysis
+We see some zig-zag pattern here as well as since it is cyclical we can pull or push the data to make it have a peak in the middle.
+
+```{r data_hourly_centered, include=TRUE, eval=TRUE}
+#transform it to have the peak in the middle
+ggplot(data_selected, aes(x = (OCCUR_hour + 12) %% 24)) +
+  geom_histogram(binwidth = 1) +
+  scale_x_continuous(breaks = seq(0, 22, 2),
+                     labels = (seq(0, 22, 2) - 12) %% 24) +
+  labs(title = "NYC Shootings by Hour of Day",
+       x = "Hour (24h, midnight centered)", y = "Number of incidents")
+```
+
+### Analysis
+This looks almost like a normal curve, with additional uptick at around 9-11am, but let us place a normal curve on top and see if it follows it, if at all in a bit.
+
+```{r data_monthly, include=TRUE, eval=TRUE}
+#let us do a similar thing to the monthly data to get the months
+data_selected <- mutate(data_selected, month = month(OCCUR_DATE))
+#plotting it directly against the months
+ggplot(data_selected, aes(x = month)) +
+  geom_histogram(binwidth = 1) +
+  scale_x_continuous(breaks = 1:12) +
+  labs(title = "NYC Shootings by Month",
+       x = "Month", y = "Number of incidents")
+```
+
+### Analysis
+The monthly shootings have that similar pattern, this didn't need the center even though it works on the same principle and is cyclical, however, summer (July) seems to have a higher number of incidents throughout the years. This maybe due to higher activity in those months from civilians as well as cops which might explain how there is a base for the incidents and then an uptick during those months.
+
+# Model
+
+```{r model, include=TRUE, eval=TRUE}
+#since the transformed data looks like a normal
+#let us try a normal model on this
+data_model <- mutate(data_selected, hour_shift = (OCCUR_hour + 12) %% 24)
+mean <- mean(data_model$hour_shift)
+var <- var(data_model$hour_shift)
+sd <- sqrt(var)
+ggplot(data_model, aes(x = hour_shift)) +
+  geom_histogram(aes(y = after_stat(density)), bins = 24) +
+  stat_function(fun = dnorm,
+                args = list(mean = mean, sd = sd),
+                color = "red", linewidth = 1) +
+  labs(title = "Shooting hour vs fitted Normal",
+       x = "Hour (midnight-centered)", y = "Density")
+
+
+sum(is.na(data_selected$OCCUR_hour))
+#This comes to 0 which means, no incidents had missing times, so none were dropped
+```
+
+```{r model_predict, include=TRUE, eval=TRUE}
+# hour_shift is midnight-centered, so real 10pm-2am = shifted 10-14
+pred <- pnorm(14, mean, sd) - pnorm(10, mean, sd)      # model's predicted share
+obs  <- mean(data_model$hour_shift >= 10 & data_model$hour_shift <= 14)  # actual share
+c(predicted = pred, observed = obs)
+```
+
+
+### Analysis
+I model incident hour as X ~ Normal(μ, σ²) and estimate μ, σ² by method of moments. The normal model fits the data with a mean of about 10:30pm where the data has a mode of about 11pm. This might be due to how people tend to report and round incidents around midnight but the incidents are happening sooner, there is also the matter of when the incident happen versus when the incident was reported and recorded. My model says `r round(pred*100, 1)`% of shootings fall in the deep-night window; the data shows `r round(obs*100, 1)`%, this is the result of the slight skew.
+
+## Bias in the Data
+
+- Time rounding. Because the times are self-reported, they tend to be rounded to 30-minute increments (e.g., 1:00 and 12:30), so there is a general trend of the observations clustering near those hourly and half-hourly marks. And if it is late at night, people tend to say it was "around 12am," which pushes the data toward that value. That is the bias we see in the data: our normal model says it is supposed to be around 10.5, but the mode comes to 11:00 for the actual data. I think those factors make it a bit left-skewed.
+- Policing coverage. One other thing is that these are NYPD police reports, which means the data gets collected more in places where there are more police. This leaves out information about what happens in places that don't have police.
+
+## Bias in the Analysis
+
+- Confirmation bias (my prior). My objective was to test how we say the later the night, the more unsafe it is. It is possible I was looking for it, but the data itself presented itself in an undeniable manner.
+- Modeling choice (cyclical data). Looking at the data, I saw a clear bell-shaped, symmetrical distribution, which is why I reached for the normal distribution. But there is a caveat: a normal distribution is not cyclical, whereas the hours during the day are. Because the times are in bins, you will notice that the end of the data and the beginning of the data don't attach back together the way they are supposed to for cyclical data, but that is also the reason it gave me the option to be able to use the normal distribution.
+- Binning and dropped columns. Some of the more qualitative data was not required for this study, so it was dropped. I was hoping to do half-hour binning initially, but realized that would cause precision issues (as mentioned above), where people tend to quote times in full-hour increments, resulting in a zig-zaggy line that would be hard to fit the data to.
+- Pooling assumption. It was assumed that over the years or locations the pattern didn't change much, however, it is likely that over the years the incidents happened sooner or later in the night or in some locations the mean time came forward and others later
+
+```{r sessioninfo}
+sessionInfo()
+```
