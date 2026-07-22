@@ -1,0 +1,187 @@
+---
+title: "Less Deadly, or Just Better Counted? The U.S. COVID-19 Case-Fatality Ratio Over Time"
+author: ''
+date: "2026-07-22"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+## The question
+
+Early in the pandemic it felt like COVID-19 was extremely lethal: a large share of the confirmed cases were dying. Later on that share looked much smaller. In this project I want to see whether that story holds up in the data, and if it does, whether the disease actually became less deadly or whether we simply got better at counting cases. To do that I track the **case-fatality ratio (CFR)**, the number of reported deaths divided by the number of reported cases, for the United States over time, and then I model the relationship between cases and deaths across the states.
+
+## The data
+
+All data comes from the Johns Hopkins University CSSE COVID-19 repository on GitHub. I looked at the data to identify what I am working with and used the two U.S. time-series files: confirmed cases and deaths, where each row is a single U.S. county (identified by `Province_State`), and each column from the fifth field onward is a calendar date holding the total count for that county up to that day. The deaths file additionally carries a `Population` column. The series runs from **January 22, 2020** to **March 9, 2023**.
+
+This report uses only base R, no extra packages.
+
+```{r import, include=TRUE, eval=TRUE}
+#read both csvs straight from github; check.names = FALSE keeps the date names as "1/22/20"
+base <- "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/"
+us_cases_raw  <- read.csv(paste0(base, "time_series_covid19_confirmed_US.csv"), check.names = FALSE)
+us_deaths_raw <- read.csv(paste0(base, "time_series_covid19_deaths_US.csv"), check.names = FALSE)
+```
+
+## Building a daily national table
+
+The files are wide, one column per date, so I do not need to reshape anything. The date columns are the ones whose names contain a "/", and summing down each of those columns gives that day's nationwide total. I put the results in a small table with a real date column.
+
+```{r daily, include=TRUE, eval=TRUE}
+#the date columns are the ones whose names contain a "/"
+date_cols <- grep("/", names(us_cases_raw), value = TRUE)
+
+#national total for each day = sum down each date column
+cases_by_day  <- colSums(us_cases_raw[, date_cols])
+deaths_by_day <- colSums(us_deaths_raw[, date_cols])
+
+#build one table: a real date, plus that day's cases and deaths
+us_by_date <- data.frame(
+  date   = as.Date(date_cols, format = "%m/%d/%y"),
+  cases  = cases_by_day,
+  deaths = deaths_by_day
+)
+
+#drop the early days with zero cases
+us_by_date <- us_by_date[us_by_date$cases > 0, ]
+```
+
+## Visualization 1: cases and deaths over time
+
+I plot cases and deaths over time on a log scale, because both span several orders of magnitude.
+
+```{r viz_totals, include=TRUE, eval=TRUE}
+plot(us_by_date$date, us_by_date$cases, type = "l", log = "y", col = "blue",
+     xlab = "", ylab = "Cumulative count (log scale)",
+     main = "U.S. cumulative COVID-19 cases and deaths")
+lines(us_by_date$date, us_by_date$deaths, col = "red")
+legend("bottomright", legend = c("cases", "deaths"), col = c("blue", "red"), lty = 1)
+```
+
+### Analysis
+
+Both curves climb steeply through 2020, then flatten as the pandemic matures. The gap between the two lines on a log scale is roughly constant for most of the series, which is already a hint: if deaths were a fixed fraction of cases, the two lines would stay parallel. The question is what happens to that fraction early on, which is exactly the case-fatality ratio.
+
+## Visualization 2: the case-fatality ratio over time
+
+Now the core of the project. I compute the CFR as a percent, `100 * deaths / cases`, for each day.
+
+```{r viz_cfr, include=TRUE, eval=TRUE}
+#case-fatality ratio as a percent, for every day
+us_by_date$cfr <- 100 * us_by_date$deaths / us_by_date$cases
+
+#the final ratio, rounded, for the write-up (the last row is the most recent day)
+n <- length(us_by_date$cfr)
+cfr_final <- round(us_by_date$cfr[n], 1)
+
+#drop the first noisy days when the counts are tiny, just for the plot
+cfr_plot <- us_by_date[us_by_date$cases > 1000, ]
+
+plot(cfr_plot$date, cfr_plot$cfr, type = "l",
+     xlab = "", ylab = "Deaths / Cases (%)",
+     main = "U.S. cumulative case-fatality ratio over time")
+```
+
+### Analysis
+
+The shape is striking. In the spring of 2020 the reported CFR sits very high, well above 5% at its peak, and then it falls steadily, settling near `r cfr_final`% by the end of the series. Taken at face value this says COVID became several times less deadly per confirmed case. But the early period is precisely when testing was hardest to get, so mostly the very sick were tested. That inflates the denominator's quality problem, not the disease's lethality, and it is the central bias I return to below.
+
+## Model: how deaths scale with cases across states
+
+To put a number on the relationship, I take each state's final totals and fit a linear model of deaths on cases. The slope estimates the average number of deaths per confirmed case, effectively a pooled CFR, and I check its prediction against a single state.
+
+```{r model, include=TRUE, eval=TRUE}
+#the last day in the data
+last_day <- date_cols[length(date_cols)]
+
+#go state by state and add up its cases, deaths and population on that last day
+states <- unique(us_cases_raw$Province_State)
+state_totals <- data.frame(state = states, cases = 0, deaths = 0, population = 0)
+for (i in 1:length(states)) {
+  s <- states[i]
+  case_rows  <- us_cases_raw$Province_State  == s   #which case rows belong to this state
+  death_rows <- us_deaths_raw$Province_State == s   #which death rows belong to this state
+  state_totals$cases[i]      <- sum(us_cases_raw[[last_day]][case_rows])
+  state_totals$deaths[i]     <- sum(us_deaths_raw[[last_day]][death_rows])
+  state_totals$population[i] <- sum(us_deaths_raw$Population[death_rows])
+}
+
+#drop any state with no cases or population
+state_totals <- state_totals[state_totals$cases > 0 & state_totals$population > 0, ]
+
+#fit deaths as a straight-line function of cases
+mod <- lm(deaths ~ cases, data = state_totals)
+summary(mod)
+
+#the model stores its fitted numbers in mod$coefficients: first is the intercept, second the slope
+intercept <- mod$coefficients[[1]]
+slope     <- mod$coefficients[[2]]
+```
+
+```{r model_plot, include=TRUE, eval=TRUE}
+#scatter of deaths vs cases with the fitted line on top
+plot(state_totals$cases, state_totals$deaths,
+     xlab = "Cases", ylab = "Deaths",
+     main = "State cumulative deaths vs cases with linear fit")
+
+#draw the fitted line: deaths = intercept + slope * cases
+abline(a = intercept, b = slope, col = "red")
+```
+
+```{r model_predict, include=TRUE, eval=TRUE}
+#work out deaths for one state (Colorado) from the line, then compare to what actually happened
+example   <- state_totals[state_totals$state == "Colorado", ]
+predicted <- intercept + slope * example$cases
+
+#how well the line fits (R-squared): compare the line's leftover error to the data's overall spread
+fitted  <- intercept + slope * state_totals$cases                     #what the line predicts for each state
+ss_line <- sum((state_totals$deaths - fitted)^2)                      #error left over around the line
+ss_mean <- sum((state_totals$deaths - mean(state_totals$deaths))^2)   #spread around a flat average
+r2      <- round(1 - ss_line / ss_mean, 2)                            #1 = perfect fit, 0 = no better than the average
+
+#rounded numbers for the write-up
+cfr_pooled <- round(100 * slope, 1)
+co_pred    <- round(predicted)
+co_actual  <- example$deaths
+
+c(deaths_per_case = round(slope, 4),
+  colorado_predicted = co_pred,
+  colorado_actual = co_actual)
+```
+
+### Analysis
+
+The fit is tight (R-squared around `r r2`), and the slope says that across states each confirmed case came with roughly `r cfr_pooled`% of a death, a pooled case-fatality ratio in the same neighborhood as the tail of the time-series plot. The prediction is instructive precisely where it misses: the pooled line expects about `r co_pred` deaths for Colorado, but the state actually recorded `r co_actual`, roughly a quarter below the model. Colorado sat under the national deaths-per-case line, a concrete example of the state-to-state variation the single slope averages away (a younger population and heavy testing are plausible reasons). So the model is a good summary of the whole, not a law for each part, and, critically, it cannot see time at all: it treats the entire pandemic as one cross-section, averaging over exactly the shift the CFR plot revealed.
+
+## Bias in the data
+
+- **Testing availability drives the early CFR.** The denominator of the CFR is *confirmed* cases, *not true infections*. In spring 2020 tests were scarce and were given mainly to people who were already seriously ill, so the confirmed pool was skewed toward the sickest. That is the single biggest reason the early ratio looks so high, as testing scaled up and caught milder cases, the ratio fell without the virus itself necessarily changing.
+
+- **Reporting lags and revisions.** Cases and deaths are recorded on different timelines, a death follows its case by weeks, and jurisdictions periodically backfilled or revised totals. Cumulative counts smooth some of this, but they also bake old revisions in.
+
+- **Death attribution.** Whether a death is counted as "from COVID" versus "with COVID" varied by place and over time, which moves the numerator independently of the disease.
+
+- **Population figures** are fixed 2019-era estimates, so per-capita comparisons ignore migration and growth over three years.
+
+## Bias in the analysis
+
+- **My framing invited the answer.** I set out to test the "it got less deadly" story, so I chose the CFR, which is the metric most likely to show it. A different lens (deaths per capita, or excess mortality) could tell a less flattering story about later waves.
+  
+- **Cumulative ratios hide the waves.** Using the *cumulative* CFR damps out the Delta and Omicron surges, a rolling ratio of new deaths to lagged new cases would be bumpier and arguably more honest, but noisier to read.
+  
+- **Pooling states in one line.** The linear model assumes every state converts cases to deaths at the same rate. States differ in age structure, testing intensity, and health-care capacity, so the single slope hides real variation, and using end-of-series cumulative totals throws away the time dimension entirely.
+
+- **Cases are not infections.** Everything here is built on *reported* numbers, the true denominator was always larger and unknowable, so every ratio should be read as an upper bound on the true fatality rate.
+
+## Conclusion
+
+Returning to the opening question: the U.S. case-fatality ratio really did fall dramatically, from well above 5% in early 2020 to roughly its end-of-series value, and the cross-state model confirms that, viewed as a whole, deaths scaled with cases at that lower pooled rate. But the weight of the evidence points to *counting*, not the virus, as the main driver of the early spike: when tests were scarce we only confirmed the sickest cases, so the denominator was artificially small and the ratio artificially large. As testing widened and milder cases entered the count, the ratio settled toward something closer to the true fatality rate. So the honest reading is "less deadly *and* better counted", the disease became somewhat less lethal over time thanks to immunity and treatment, yet most of the eye-popping early number was a measurement artifact rather than a change in the virus.
+
+```{r sessioninfo}
+sessionInfo()
+```
